@@ -3,6 +3,7 @@ import logging
 import json
 import re
 import sqlite3
+import os  # Добавляем для чтения переменных окружения
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -15,16 +16,22 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-# Set up logging
+# Set up logging to output to stdout for Render
 logging.basicConfig(
     level=logging.INFO,
-    filename='bot.log',
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Вывод в stdout
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Bot token and admin IDs
-BOT_TOKEN = "7588765445:AAFgOHim-qY93StBbxN4VePE-Mpkbh5Vidk"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+logger.info(f"BOT_TOKEN value: {BOT_TOKEN}")
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN is not set, exiting...")
+    exit(1)
 ADMIN_IDS = [6247655284]  # Only one admin for testing
 
 # Cafe address
@@ -82,7 +89,7 @@ MENU = {
 # Initialize SQLite database
 def init_db():
     try:
-        conn = sqlite3.connect("orders.db")
+        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -107,14 +114,14 @@ def init_db():
 # Save order to SQLite
 def save_to_db(order):
     try:
-        conn = sqlite3.connect("orders.db")
+        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO orders (date, items, total_price, delivery, address, table_number, name, phone)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             order["Date"],
-            json.dumps(order["Items"]),  # Store items as JSON string
+            json.dumps(order["Items"]),
             order["Total Price"],
             order["Delivery"],
             order["Address"],
@@ -132,7 +139,7 @@ def save_to_db(order):
 # Get recent orders from SQLite (last 5)
 def get_recent_orders():
     try:
-        conn = sqlite3.connect("orders.db")
+        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 5")
         orders = cursor.fetchall()
@@ -191,9 +198,11 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # Command /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        user_id = update.effective_user.id
+        logger.info(f"Received /start from user {user_id}")
         # Initialize the cart and previous state
         context.user_data["cart"] = []
-        context.user_data["previous_state"] = None  # No previous state at the start
+        context.user_data["previous_state"] = None
         # Show menu categories with the cafe address
         keyboard = [[category] for category in MENU.keys()]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
@@ -201,10 +210,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             f"Hello! 😊 Welcome to One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
             reply_markup=reply_markup
         )
-        logger.info(f"User {update.effective_user.id} started a new session.")
+        logger.info(f"Sent welcome message to user {user_id}")
         return CATEGORY
     except Exception as e:
-        logger.error(f"Error in start: {e}")
+        logger.error(f"Error in start for user {user_id}: {e}")
         await update.message.reply_text("Something went wrong. Please try again later! 😊")
         return ConversationHandler.END
 
@@ -221,7 +230,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return CATEGORY
         
         context.user_data["category"] = category
-        context.user_data["previous_state"] = CATEGORY  # Save current state as previous
+        context.user_data["previous_state"] = CATEGORY
         # Create a numbered list of drinks
         items = MENU[category]
         items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
@@ -230,10 +239,10 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         row = []
         for item in items:
             row.append(item['name'])
-            if len(row) == 3:  # If the row has 3 buttons, add it to the keyboard
+            if len(row) == 3:
                 keyboard.append(row)
                 row = []
-        if row:  # Add any remaining buttons
+        if row:
             keyboard.append(row)
         # Add Back button
         keyboard.append(["Back"])
@@ -266,7 +275,7 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         # Add the selected drink to the cart
         context.user_data["cart"].append({"name": item["name"], "price": item["price"]})
-        context.user_data["previous_state"] = ITEM  # Save current state as previous
+        context.user_data["previous_state"] = ITEM
         # Show the cart and ask what to do next
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
         total_price = sum(drink["price"] for drink in context.user_data["cart"])
@@ -566,13 +575,13 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             total_price = sum(drink["price"] for drink in cart)
             order = {
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Items": cart,  # Save the entire cart
+                "Items": cart,
                 "Total Price": total_price,
                 "Delivery": context.user_data["delivery"],
                 "Address": context.user_data.get("address", "Not specified"),
                 "Table": context.user_data.get("table", "Not specified"),
                 "Name": context.user_data["name"],
-                "Phone": context.user_data.get("phone", "Not provided"),  # Default if not provided
+                "Phone": context.user_data.get("phone", "Not provided"),
             }
             # Save to SQLite
             save_to_db(order)
@@ -682,7 +691,7 @@ if __name__ == "__main__":
         # Add handlers to application
         application.add_handler(conv_handler)
         application.add_handler(CallbackQueryHandler(handle_button))
-        application.add_handler(CommandHandler("orders", orders))  # Add /orders command
+        application.add_handler(CommandHandler("orders", orders))
         # Start the bot
         logger.info("Bot started.")
         application.run_polling()
