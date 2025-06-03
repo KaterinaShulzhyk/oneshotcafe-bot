@@ -3,7 +3,8 @@ import logging
 import json
 import re
 import sqlite3
-import os  # Добавляем для чтения переменных окружения
+import os
+from pathlib import Path  # Added for path handling
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -21,17 +22,16 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler()  # Вывод в stdout
+        logging.StreamHandler()  # Output to stdout
     ]
 )
 logger = logging.getLogger(__name__)
 
 # Bot token and admin IDs
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-logger.info(f"BOT_TOKEN value: {BOT_TOKEN}")
 if not BOT_TOKEN:
-    logger.error("BOT_TOKEN is not set, exiting...")
-    exit(1)
+    logger.error("❌ Ошибка: Не задан BOT_TOKEN! Добавь его в настройки Render.")
+    raise ValueError("❌ Ошибка: Не задан BOT_TOKEN! Добавь его в настройки Render.")
 ADMIN_IDS = [6247655284]  # Only one admin for testing
 
 # Cafe address
@@ -86,10 +86,17 @@ MENU = {
     ]
 }
 
+# Create 'data' directory if it doesn't exist
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# Path to the database
+DB_PATH = DATA_DIR / "orders.db"
+
 # Initialize SQLite database
 def init_db():
     try:
-        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -114,7 +121,7 @@ def init_db():
 # Save order to SQLite
 def save_to_db(order):
     try:
-        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO orders (date, items, total_price, delivery, address, table_number, name, phone)
@@ -139,7 +146,7 @@ def save_to_db(order):
 # Get recent orders from SQLite (last 5)
 def get_recent_orders():
     try:
-        conn = sqlite3.connect("/data/orders.db")  # Используем путь к диску Render
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 5")
         orders = cursor.fetchall()
@@ -200,9 +207,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
         logger.info(f"Received /start from user {user_id}")
-        # Initialize the cart and previous state
+        # Clear old data to prevent errors
+        context.user_data.clear()
+        # Initialize cart
         context.user_data["cart"] = []
-        context.user_data["previous_state"] = None
         # Show menu categories with the cafe address
         keyboard = [[category] for category in MENU.keys()]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
@@ -379,7 +387,7 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return CART
         # Remove the selected drink
         context.user_data["cart"] = [drink for drink in context.user_data["cart"] if drink["name"] != selection]
-        # Show the updated cart using the modified cart
+        # Show the updated cart
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
         total_price = sum(drink["price"] for drink in context.user_data["cart"])
         await update.message.reply_text(
@@ -698,4 +706,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error in main: {e}")
         raise
-    
