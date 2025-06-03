@@ -1,4 +1,3 @@
-# Importing necessary libraries for the bot
 import logging
 import json
 import re
@@ -98,6 +97,7 @@ def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         # Orders table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -112,117 +112,128 @@ def init_db():
                 phone TEXT
             )
         """)
+        
         # User states table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_states (
                 user_id INTEGER PRIMARY KEY,
                 state INTEGER,
                 cart TEXT,
-                category TEXT,
                 delivery TEXT,
                 address TEXT,
                 name TEXT,
                 table_number TEXT,
                 phone TEXT,
-                previous_state INTEGER
+                last_updated TEXT
             )
         """)
+        
         # Error logs table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS error_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 error TEXT,
-                timestamp TEXT
+                timestamp TEXT,
+                state TEXT
             )
         """)
+        
         conn.commit()
         logger.info("Database initialized successfully.")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
+        raise
     finally:
         if 'conn' in locals():
             conn.close()
 
-# Save user state to SQLite
+# Save user state to database
 def save_user_state(user_id, context_data):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         cursor.execute("""
             INSERT OR REPLACE INTO user_states 
-            (user_id, state, cart, category, delivery, address, name, table_number, phone, previous_state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, state, cart, delivery, address, name, table_number, phone, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id,
             context_data.get("state"),
             json.dumps(context_data.get("cart", [])),
-            context_data.get("category"),
             context_data.get("delivery"),
             context_data.get("address"),
             context_data.get("name"),
             context_data.get("table"),
             context_data.get("phone"),
-            context_data.get("previous_state")
+            datetime.now().isoformat()
         ))
+        
         conn.commit()
-        logger.debug(f"User state saved for user {user_id}")
     except Exception as e:
-        logger.error(f"Failed to save user state for user {user_id}: {e}")
-        log_error(user_id, f"Save user state error: {e}")
+        logger.error(f"Failed to save user state: {e}")
+        raise
     finally:
         if 'conn' in locals():
             conn.close()
 
-# Load user state from SQLite
+# Load user state from database
 def load_user_state(user_id):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         cursor.execute("SELECT * FROM user_states WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
+        
         if row:
             return {
                 "state": row[1],
                 "cart": json.loads(row[2]) if row[2] else [],
-                "category": row[3],
-                "delivery": row[4],
-                "address": row[5],
-                "name": row[6],
-                "table": row[7],
-                "phone": row[8],
-                "previous_state": row[9]
+                "delivery": row[3],
+                "address": row[4],
+                "name": row[5],
+                "table": row[6],
+                "phone": row[7]
             }
         return None
     except Exception as e:
-        logger.error(f"Failed to load user state for user {user_id}: {e}")
-        log_error(user_id, f"Load user state error: {e}")
+        logger.error(f"Failed to load user state: {e}")
         return None
     finally:
         if 'conn' in locals():
             conn.close()
 
-# Log errors to SQLite
-def log_error(user_id, error):
+# Log error to database
+def log_error(user_id, error, state=None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         cursor.execute("""
-            INSERT INTO error_logs (user_id, error, timestamp)
-            VALUES (?, ?, ?)
-        """, (user_id, str(error), datetime.now().isoformat()))
+            INSERT INTO error_logs (user_id, error, timestamp, state)
+            VALUES (?, ?, ?, ?)
+        """, (
+            user_id,
+            str(error),
+            datetime.now().isoformat(),
+            str(state)
+        ))
+        
         conn.commit()
     except Exception as e:
-        logger.error(f"Failed to log error for user {user_id}: {e}")
+        logger.error(f"Failed to log error: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
 
-# Save order to SQLite
+# Save order to database
 def save_to_db(order):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         cursor.execute("""
             INSERT INTO orders (date, items, total_price, delivery, address, table_number, name, phone)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -236,26 +247,26 @@ def save_to_db(order):
             order["Name"],
             order["Phone"]
         ))
+        
         conn.commit()
         logger.info("Order saved to database successfully.")
     except Exception as e:
         logger.error(f"Failed to save order to database: {e}")
-        log_error(0, f"Save order error: {e}")
+        raise
     finally:
         if 'conn' in locals():
             conn.close()
 
-# Get recent orders from SQLite (last 5)
+# Get recent orders from database
 def get_recent_orders():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
         cursor.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 5")
-        orders = cursor.fetchall()
-        return orders
+        return cursor.fetchall()
     except Exception as e:
         logger.error(f"Failed to get recent orders: {e}")
-        log_error(0, f"Get recent orders error: {e}")
         return []
     finally:
         if 'conn' in locals():
@@ -273,7 +284,6 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         orders = get_recent_orders()
         if not orders:
             await update.message.reply_text("No orders found.")
-            logger.info("No orders found for /orders command.")
             return
 
         response = "Recent Orders (last 5):\n\n"
@@ -281,6 +291,7 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             order_id, date, items_json, total_price, delivery, address, table_number, name, phone = order
             items = json.loads(items_json)
             cart_summary = "\n".join([f"- {item['name']} — {item['price']} $" for item in items])
+            
             order_details = (
                 f"Order ID: {order_id}\n"
                 f"Date: {date}\n"
@@ -288,10 +299,12 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Total: {total_price:.2f} $\n"
                 f"Method: {delivery}\n"
             )
+            
             if delivery == "Delivery":
                 order_details += f"Address: {address}\n"
             elif delivery == "Drink On-Site":
                 order_details += f"Table Number: {table_number}\n"
+                
             order_details += (
                 f"Name: {name}\n"
                 f"Phone: {phone}\n"
@@ -303,7 +316,7 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"Admin {user_id} viewed recent orders.")
     except Exception as e:
         logger.error(f"Error in orders command: {e}")
-        log_error(user_id, f"Orders command error: {e}")
+        log_error(update.effective_user.id, e, "orders")
         await update.message.reply_text("Something went wrong while fetching orders. Please try again! 😊")
 
 # Command /start
@@ -312,69 +325,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = update.effective_user.id
         logger.info(f"Received /start from user {user_id}")
         
-        # Load existing state or initialize new
-        saved_state = load_user_state(user_id)
-        if saved_state and saved_state["state"] is not None:
-            context.user_data.update(saved_state)
-            # Restore to the saved state
-            if saved_state["state"] == CATEGORY:
-                keyboard = [[category] for category in MENU.keys()]
-                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-                await update.message.reply_text(
-                    f"Welcome back! 😊 Continue your order at One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
-                    reply_markup=reply_markup
-                )
-                return CATEGORY
-            elif saved_state["state"] == ITEM:
-                category = saved_state["category"]
-                items = MENU[category]
-                items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
-                keyboard = [[item['name'] for item in items[i:i+3]] for i in range(0, len(items), 3)] + [["Back"]]
-                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-                await update.message.reply_text(
-                    f"Choose a drink from the category {category}:\n\n{items_list}\n\nTap on the drink name below:",
-                    reply_markup=reply_markup
-                )
-                return ITEM
-            elif saved_state["state"] == CART:
-                cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in saved_state["cart"]])
-                total_price = sum(drink["price"] for drink in saved_state["cart"])
-                await update.message.reply_text(
-                    f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
-                    reply_markup=ReplyKeyboardMarkup(
-                        [["Add More Drinks", "Remove a Drink"], ["Place Order"], ["Back"]],
-                        one_time_keyboard=True
-                    )
-                )
-                return CART
-            # Add other states as needed
-        else:
-            # Initialize new user data
-            context.user_data.clear()
-            context.user_data.update({
-                "cart": [],
-                "category": None,
-                "delivery": None,
-                "address": None,
-                "name": None,
-                "table": None,
-                "phone": None,
-                "previous_state": None,
-                "state": CATEGORY
-            })
-            save_user_state(user_id, context.user_data)
+        # Clear any existing state
+        context.user_data.clear()
+        
+        # Initialize fresh state
+        initial_state = {
+            "state": CATEGORY,
+            "cart": [],
+            "delivery": None,
+            "address": None,
+            "name": None,
+            "table": None,
+            "phone": None
+        }
+        
+        # Save to database
+        save_user_state(user_id, initial_state)
+        context.user_data.update(initial_state)
         
         # Show menu categories
         keyboard = [[category] for category in MENU.keys()]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        
         await update.message.reply_text(
             f"Hello! 😊 Welcome to One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
             reply_markup=reply_markup
         )
+        
         return CATEGORY
     except Exception as e:
         logger.error(f"Error in start for user {user_id}: {e}")
-        log_error(user_id, f"Start command error: {e}")
+        log_error(update.effective_user.id, e, "start")
         await update.message.reply_text("Something went wrong. Please try again later! 😊")
         return ConversationHandler.END
 
@@ -382,41 +363,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if "cart" not in context.user_data:
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
+        text = update.message.text
         
-        category = update.message.text
-        if category == "Back":
+        # Handle Back command
+        if text == "Back":
             saved_state = load_user_state(user_id)
-            if saved_state and saved_state["previous_state"] is not None:
+            if saved_state:
                 context.user_data.update(saved_state)
-                return await start(update, context)
+                return saved_state["state"]
             return await start(update, context)
         
-        if category not in MENU:
+        # Validate category
+        if text not in MENU:
             await update.message.reply_text("Oops, please choose a category from the list! 😊")
             return CATEGORY
         
-        context.user_data["category"] = category
-        context.user_data["previous_state"] = CATEGORY
+        # Update state
+        context.user_data.update({
+            "state": CATEGORY,
+            "category": text
+        })
+        save_user_state(user_id, context.user_data)
+        
+        # Prepare items list
+        items = MENU[text]
+        items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
+        
+        # Create keyboard
+        keyboard = []
+        row = []
+        for item in items:
+            row.append(item['name'])
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append(["Back"])
+        
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        
+        await update.message.reply_text(
+            f"Choose a drink from the category {text}:\n\n{items_list}\n\nTap on the drink name below:",
+            reply_markup=reply_markup
+        )
+        
         context.user_data["state"] = ITEM
         save_user_state(user_id, context.user_data)
         
-        items = MENU[category]
-        items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
-        
-        keyboard = [[item['name'] for item in items[i:i+3]] for i in range(0, len(items), 3)] + [["Back"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        await update.message.reply_text(
-            f"Choose a drink from the category {category}:\n\n{items_list}\n\nTap on the drink name below:",
-            reply_markup=reply_markup
-        )
         return ITEM
     except Exception as e:
-        logger.error(f"Error in select_category for user {user_id}: {e}")
-        log_error(user_id, f"Select category error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in select_category: {e}")
+        log_error(update.effective_user.id, e, "select_category")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -424,32 +422,43 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if "cart" not in context.user_data or "category" not in context.user_data:
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
-            return await start(update, context)
+        text = update.message.text
         
-        selected_item = update.message.text
-        if selected_item == "Back":
+        # Handle Back command
+        if text == "Back":
             context.user_data["state"] = CATEGORY
             save_user_state(user_id, context.user_data)
+            
+            keyboard = [[category] for category in MENU.keys()]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
+            await update.message.reply_text(
+                "Choose a category:",
+                reply_markup=reply_markup
+            )
+            return CATEGORY
+        
+        # Find selected item
+        category = context.user_data.get("category")
+        if not category:
+            await update.message.reply_text("Category not found. Let's start over.")
             return await start(update, context)
-
-        category = context.user_data["category"]
-        items = MENU[category]
-        item = next((i for i in items if i["name"] == selected_item), None)
+            
+        items = MENU.get(category, [])
+        item = next((i for i in items if i["name"] == text), None)
+        
         if not item:
             await update.message.reply_text("Please choose a drink from the list! 😊")
             return ITEM
         
-        if not isinstance(context.user_data.get("cart"), list):
+        # Update cart
+        if "cart" not in context.user_data or not isinstance(context.user_data["cart"], list):
             context.user_data["cart"] = []
-        
+            
         context.user_data["cart"].append({"name": item["name"], "price": item["price"]})
-        context.user_data["previous_state"] = ITEM
-        context.user_data["state"] = CART
         save_user_state(user_id, context.user_data)
         
+        # Show cart summary
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
         total_price = sum(drink["price"] for drink in context.user_data["cart"])
         
@@ -460,11 +469,14 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 one_time_keyboard=True
             )
         )
+        
+        context.user_data["state"] = CART
+        save_user_state(user_id, context.user_data)
+        
         return CART
     except Exception as e:
-        logger.error(f"Error in select_item for user {user_id}: {e}")
-        log_error(user_id, f"Select item error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in select_item: {e}")
+        log_error(update.effective_user.id, e, "select_item")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -472,82 +484,101 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if "cart" not in context.user_data or not isinstance(context.user_data["cart"], list):
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
-            await update.message.reply_text("Your cart is empty! Let's start over.")
-            return await start(update, context)
+        text = update.message.text
         
-        action = update.message.text
-        if action == "Back":
+        # Handle Back command
+        if text == "Back":
             category = context.user_data.get("category")
             if not category:
-                context.user_data["state"] = CATEGORY
-                save_user_state(user_id, context.user_data)
                 return await start(update, context)
                 
-            context.user_data["state"] = ITEM
-            save_user_state(user_id, context.user_data)
             items = MENU[category]
             items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
             
-            keyboard = [[item['name'] for item in items[i:i+3]] for i in range(0, len(items), 3)] + [["Back"]]
+            keyboard = []
+            row = []
+            for item in items:
+                row.append(item['name'])
+                if len(row) == 3:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+            keyboard.append(["Back"])
+            
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
             await update.message.reply_text(
                 f"Choose a drink from the category {category}:\n\n{items_list}\n\nTap on the drink name below:",
                 reply_markup=reply_markup
             )
-            return ITEM
-
-        if action == "Add More Drinks":
-            context.user_data["state"] = CATEGORY
+            
+            context.user_data["state"] = ITEM
             save_user_state(user_id, context.user_data)
+            
+            return ITEM
+        
+        # Handle actions
+        if text == "Add More Drinks":
             keyboard = [[category] for category in MENU.keys()]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
             await update.message.reply_text(
                 "Choose another category:",
                 reply_markup=reply_markup
             )
+            
+            context.user_data["state"] = CATEGORY
+            save_user_state(user_id, context.user_data)
+            
             return CATEGORY
-        elif action == "Remove a Drink":
-            cart = context.user_data["cart"]
+            
+        elif text == "Remove a Drink":
+            cart = context.user_data.get("cart", [])
             if not cart:
                 await update.message.reply_text("Your cart is empty! Let's add some drinks.")
-                context.user_data["state"] = CATEGORY
-                save_user_state(user_id, context.user_data)
                 return CATEGORY
                 
-            context.user_data["state"] = REMOVE
-            save_user_state(user_id, context.user_data)
             keyboard = [[drink["name"] for drink in cart]] + [["Back to Cart"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
+            
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\n\nWhich drink would you like to remove?",
                 reply_markup=reply_markup
             )
+            
+            context.user_data["state"] = REMOVE
+            save_user_state(user_id, context.user_data)
+            
             return REMOVE
-        elif action == "Place Order":
-            if not context.user_data["cart"]:
+            
+        elif text == "Place Order":
+            cart = context.user_data.get("cart", [])
+            if not cart:
                 await update.message.reply_text("Your cart is empty! Let's add some drinks.")
-                context.user_data["state"] = CATEGORY
-                save_user_state(user_id, context.user_data)
                 return CATEGORY
                 
-            context.user_data["state"] = DELIVERY
-            save_user_state(user_id, context.user_data)
             keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-            await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
+            
+            await update.message.reply_text(
+                "How would you like to receive your order?", 
+                reply_markup=reply_markup
+            )
+            
+            context.user_data["state"] = DELIVERY
+            save_user_state(user_id, context.user_data)
+            
             return DELIVERY
+            
         else:
             await update.message.reply_text("Please choose an option!")
             return CART
     except Exception as e:
-        logger.error(f"Error in cart_action for user {user_id}: {e}")
-        log_error(user_id, f"Cart action error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in cart_action: {e}")
+        log_error(update.effective_user.id, e, "cart_action")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -555,17 +586,13 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if "cart" not in context.user_data or not isinstance(context.user_data["cart"], list):
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
-            return await start(update, context)
+        text = update.message.text
         
-        selection = update.message.text
-        if selection == "Back to Cart":
-            context.user_data["state"] = CART
-            save_user_state(user_id, context.user_data)
-            cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
-            total_price = sum(drink["price"] for drink in context.user_data["cart"])
+        # Handle Back command
+        if text == "Back to Cart":
+            cart = context.user_data.get("cart", [])
+            cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
+            total_price = sum(drink["price"] for drink in cart)
             
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
@@ -574,14 +601,21 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     one_time_keyboard=True
                 )
             )
+            
+            context.user_data["state"] = CART
+            save_user_state(user_id, context.user_data)
+            
             return CART
-        
-        context.user_data["cart"] = [drink for drink in context.user_data["cart"] if drink["name"] != selection]
-        context.user_data["state"] = CART
+            
+        # Remove the selected drink
+        cart = context.user_data.get("cart", [])
+        context.user_data["cart"] = [drink for drink in cart if drink["name"] != text]
         save_user_state(user_id, context.user_data)
         
-        cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
-        total_price = sum(drink["price"] for drink in context.user_data["cart"])
+        # Show updated cart
+        updated_cart = context.user_data["cart"]
+        cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in updated_cart])
+        total_price = sum(drink["price"] for drink in updated_cart)
         
         await update.message.reply_text(
             f"Drink removed! Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
@@ -590,30 +624,28 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 one_time_keyboard=True
             )
         )
+        
+        context.user_data["state"] = CART
+        save_user_state(user_id, context.user_data)
+        
         return CART
     except Exception as e:
-        logger.error(f"Error in remove_item for user {user_id}: {e}")
-        log_error(user_id, f"Remove item error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in remove_item: {e}")
+        log_error(update.effective_user.id, e, "remove_item")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
-# Select delivery, pickup, or drink on-site
+# Select delivery method
 async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if "cart" not in context.user_data or not context.user_data["cart"]:
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
-            await update.message.reply_text("Your cart is empty! Let's add some drinks.")
-            return await start(update, context)
+        text = update.message.text
         
-        delivery = update.message.text
-        if delivery == "Back":
-            context.user_data["state"] = CART
-            save_user_state(user_id, context.user_data)
-            cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
-            total_price = sum(drink["price"] for drink in context.user_data["cart"])
+        # Handle Back command
+        if text == "Back":
+            cart = context.user_data.get("cart", [])
+            cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
+            total_price = sum(drink["price"] for drink in cart)
             
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
@@ -622,27 +654,47 @@ async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     one_time_keyboard=True
                 )
             )
+            
+            context.user_data["state"] = CART
+            save_user_state(user_id, context.user_data)
+            
             return CART
-
-        if delivery not in ["Delivery", "Pickup", "Drink On-Site"]:
+            
+        # Validate delivery method
+        if text not in ["Delivery", "Pickup", "Drink On-Site"]:
             await update.message.reply_text("Choose 'Delivery', 'Pickup', or 'Drink On-Site'! 😊")
             return DELIVERY
-        
-        context.user_data["delivery"] = delivery
-        context.user_data["previous_state"] = DELIVERY
-        context.user_data["state"] = ADDRESS if delivery == "Delivery" else NAME
+            
+        # Update state
+        context.user_data.update({
+            "delivery": text,
+            "state": DELIVERY
+        })
         save_user_state(user_id, context.user_data)
         
-        if delivery == "Delivery":
-            await update.message.reply_text("Enter your delivery address:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+        if text == "Delivery":
+            await update.message.reply_text(
+                "Enter your delivery address:",
+                reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+            )
+            
+            context.user_data["state"] = ADDRESS
+            save_user_state(user_id, context.user_data)
+            
             return ADDRESS
         else:
-            await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+            await update.message.reply_text(
+                "Enter your name:",
+                reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+            )
+            
+            context.user_data["state"] = NAME
+            save_user_state(user_id, context.user_data)
+            
             return NAME
     except Exception as e:
-        logger.error(f"Error in select_delivery for user {user_id}: {e}")
-        log_error(user_id, f"Select delivery error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in select_delivery: {e}")
+        log_error(update.effective_user.id, e, "select_delivery")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -650,26 +702,42 @@ async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def get_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        address = update.message.text
-        if address == "Back":
-            context.user_data["state"] = DELIVERY
-            save_user_state(user_id, context.user_data)
+        text = update.message.text
+        
+        # Handle Back command
+        if text == "Back":
             keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-            await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
+            
+            await update.message.reply_text(
+                "How would you like to receive your order?",
+                reply_markup=reply_markup
+            )
+            
+            context.user_data["state"] = DELIVERY
+            save_user_state(user_id, context.user_data)
+            
             return DELIVERY
+            
+        # Save address
+        context.user_data.update({
+            "address": text,
+            "state": ADDRESS
+        })
+        save_user_state(user_id, context.user_data)
         
-        context.user_data["address"] = address
-        context.user_data["previous_state"] = ADDRESS
+        await update.message.reply_text(
+            "Enter your name:",
+            reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+        )
+        
         context.user_data["state"] = NAME
         save_user_state(user_id, context.user_data)
         
-        await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
         return NAME
     except Exception as e:
-        logger.error(f"Error in get_address for user {user_id}: {e}")
-        log_error(user_id, f"Get address error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in get_address: {e}")
+        log_error(update.effective_user.id, e, "get_address")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -677,38 +745,64 @@ async def get_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        name = update.message.text
-        if name == "Back":
-            previous_state = context.user_data.get("previous_state", DELIVERY)
-            context.user_data["state"] = previous_state
-            save_user_state(user_id, context.user_data)
-            
-            if previous_state == DELIVERY:
-                keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
-                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-                await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
-                return DELIVERY
-            elif previous_state == ADDRESS:
-                await update.message.reply_text("Enter your delivery address:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+        text = update.message.text
+        
+        # Handle Back command
+        if text == "Back":
+            if context.user_data.get("delivery") == "Delivery":
+                await update.message.reply_text(
+                    "Enter your delivery address:",
+                    reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+                )
+                
+                context.user_data["state"] = ADDRESS
+                save_user_state(user_id, context.user_data)
+                
                 return ADDRESS
             else:
-                return await start(update, context)
-        
-        context.user_data["name"] = name
-        context.user_data["previous_state"] = NAME
-        context.user_data["state"] = TABLE if context.user_data["delivery"] == "Drink On-Site" else PHONE
+                keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
+                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+                
+                await update.message.reply_text(
+                    "How would you like to receive your order?",
+                    reply_markup=reply_markup
+                )
+                
+                context.user_data["state"] = DELIVERY
+                save_user_state(user_id, context.user_data)
+                
+                return DELIVERY
+                
+        # Save name
+        context.user_data.update({
+            "name": text,
+            "state": NAME
+        })
         save_user_state(user_id, context.user_data)
         
-        if context.user_data["delivery"] == "Drink On-Site":
-            await update.message.reply_text("Enter your table number:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+        if context.user_data.get("delivery") == "Drink On-Site":
+            await update.message.reply_text(
+                "Enter your table number (1-20):",
+                reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+            )
+            
+            context.user_data["state"] = TABLE
+            save_user_state(user_id, context.user_data)
+            
             return TABLE
+            
+        await update.message.reply_text(
+            "Enter your phone number (e.g., +1234567890):",
+            reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+        )
         
-        await update.message.reply_text("Enter your phone number (e.g., +1234567890):", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+        context.user_data["state"] = PHONE
+        save_user_state(user_id, context.user_data)
+        
         return PHONE
     except Exception as e:
-        logger.error(f"Error in get_name for user {user_id}: {e}")
-        log_error(user_id, f"Get name error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in get_name: {e}")
+        log_error(update.effective_user.id, e, "get_name")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -716,28 +810,39 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        table = update.message.text
-        if table == "Back":
+        text = update.message.text
+        
+        # Handle Back command
+        if text == "Back":
+            await update.message.reply_text(
+                "Enter your name:",
+                reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+            )
+            
             context.user_data["state"] = NAME
             save_user_state(user_id, context.user_data)
-            await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+            
             return NAME
-
+            
+        # Validate table number
         try:
-            table_num = int(table)
+            table_num = int(text)
             if not 1 <= table_num <= 20:
                 await update.message.reply_text("Please enter a table number between 1 and 20!")
                 return TABLE
         except ValueError:
             await update.message.reply_text("Please enter a valid table number (e.g., 5)!")
             return TABLE
-        
-        context.user_data["table"] = table
-        context.user_data["previous_state"] = TABLE
-        context.user_data["state"] = CONFIRM
+            
+        # Save table number
+        context.user_data.update({
+            "table": text,
+            "state": TABLE
+        })
         save_user_state(user_id, context.user_data)
         
-        cart = context.user_data["cart"]
+        # Show order summary
+        cart = context.user_data.get("cart", [])
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
         total_price = sum(drink["price"] for drink in cart)
         
@@ -745,20 +850,27 @@ async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             f"Your order:\n"
             f"Drinks:\n{cart_summary}\n"
             f"Total: {total_price:.2f} $\n"
-            f"Method: {context.user_data['delivery']}\n"
+            f"Method: {context.user_data.get('delivery')}\n"
             f"Table Number: {context.user_data.get('table', 'Not specified')}\n"
-            f"Name: {context.user_data['name']}\n"
+            f"Name: {context.user_data.get('name')}\n"
             f"Everything correct? (Yes/No)"
         )
         
         keyboard = [["Yes"], ["No"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        await update.message.reply_text(order_summary, reply_markup=reply_markup)
+        
+        await update.message.reply_text(
+            order_summary,
+            reply_markup=reply_markup
+        )
+        
+        context.user_data["state"] = CONFIRM
+        save_user_state(user_id, context.user_data)
+        
         return CONFIRM
     except Exception as e:
-        logger.error(f"Error in get_table for user {user_id}: {e}")
-        log_error(user_id, f"Get table error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in get_table: {e}")
+        log_error(update.effective_user.id, e, "get_table")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -766,23 +878,34 @@ async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        phone = update.message.text
-        if phone == "Back":
+        text = update.message.text
+        
+        # Handle Back command
+        if text == "Back":
+            await update.message.reply_text(
+                "Enter your name:",
+                reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True)
+            )
+            
             context.user_data["state"] = NAME
             save_user_state(user_id, context.user_data)
-            await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
+            
             return NAME
-
-        if not re.match(r"^\+?\d{10,15}$", phone):
+            
+        # Validate phone number
+        if not re.match(r"^\+?\d{10,15}$", text):
             await update.message.reply_text("Oops, please enter a valid phone number (e.g., +1234567890)! 😊")
             return PHONE
-        
-        context.user_data["phone"] = phone
-        context.user_data["previous_state"] = PHONE
-        context.user_data["state"] = CONFIRM
+            
+        # Save phone number
+        context.user_data.update({
+            "phone": text,
+            "state": PHONE
+        })
         save_user_state(user_id, context.user_data)
         
-        cart = context.user_data["cart"]
+        # Show order summary
+        cart = context.user_data.get("cart", [])
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
         total_price = sum(drink["price"] for drink in cart)
         
@@ -790,28 +913,35 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             f"Your order:\n"
             f"Drinks:\n{cart_summary}\n"
             f"Total: {total_price:.2f} $\n"
-            f"Method: {context.user_data['delivery']}\n"
+            f"Method: {context.user_data.get('delivery')}\n"
         )
         
-        if context.user_data["delivery"] == "Delivery":
+        if context.user_data.get("delivery") == "Delivery":
             order_summary += f"Address: {context.user_data.get('address', 'Not specified')}\n"
-        elif context.user_data["delivery"] == "Drink On-Site":
+        elif context.user_data.get("delivery") == "Drink On-Site":
             order_summary += f"Table Number: {context.user_data.get('table', 'Not specified')}\n"
-        
+            
         order_summary += (
-            f"Name: {context.user_data['name']}\n"
-            f"Phone: {context.user_data['phone']}\n"
+            f"Name: {context.user_data.get('name')}\n"
+            f"Phone: {context.user_data.get('phone')}\n"
             f"Everything correct? (Yes/No)"
         )
         
         keyboard = [["Yes"], ["No"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        await update.message.reply_text(order_summary, reply_markup=reply_markup)
+        
+        await update.message.reply_text(
+            order_summary,
+            reply_markup=reply_markup
+        )
+        
+        context.user_data["state"] = CONFIRM
+        save_user_state(user_id, context.user_data)
+        
         return CONFIRM
     except Exception as e:
-        logger.error(f"Error in get_phone for user {user_id}: {e}")
-        log_error(user_id, f"Get phone error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in get_phone: {e}")
+        log_error(update.effective_user.id, e, "get_phone")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
@@ -819,15 +949,17 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        if update.message.text == "Yes":
+        text = update.message.text
+        
+        if text == "Yes":
+            # Verify all required data exists
             required_fields = ["cart", "delivery", "name"]
             for field in required_fields:
                 if field not in context.user_data:
-                    context.user_data.update({"cart": [], "state": CATEGORY})
-                    save_user_state(user_id, context.user_data)
                     await update.message.reply_text("Oops, something went wrong with your order. Let's start over!")
                     return await start(update, context)
-            
+                    
+            # Create order
             cart = context.user_data["cart"]
             total_price = sum(drink["price"] for drink in cart)
             
@@ -842,8 +974,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 "Phone": context.user_data.get("phone", "Not provided"),
             }
             
+            # Save to database
             save_to_db(order)
             
+            # Notify admins
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
             order_summary = (
                 f"New order:\n"
@@ -866,13 +1000,15 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             if order["Delivery"] == "Pickup":
                 order_summary += f"\nPickup Location: {CAFE_ADDRESS}"
                 
+            # Send to all admins
             for admin_id in ADMIN_IDS:
                 try:
                     await context.bot.send_message(chat_id=admin_id, text=order_summary)
                 except Exception as e:
                     logger.error(f"Failed to notify admin {admin_id}: {e}")
-                    log_error(user_id, f"Notify admin {admin_id} error: {e}")
+                    log_error(admin_id, e, "admin_notification")
             
+            # Confirm to user
             confirmation_message = (
                 f"Great! Your order is placed! Thank you! 😊\n"
                 f"Please pick up your order at: {CAFE_ADDRESS}\n\n"
@@ -885,44 +1021,65 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             
             await update.message.reply_text(confirmation_message, reply_markup=reply_markup)
             
-            # Clear user state after order
+            # Clear user data
             context.user_data.clear()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
-            conn.commit()
-            conn.close()
+            
+            # Remove saved state from database
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Failed to clear user state from DB: {e}")
+            
             return ConversationHandler.END
         else:
-            await update.message.reply_text("Order canceled. Type /start to begin again! 😊", reply_markup=ReplyKeyboardRemove())
+            await update.message.reply_text(
+                "Order canceled. Type /start to begin again! 😊",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            
+            # Clear user data
             context.user_data.clear()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
-            conn.commit()
-            conn.close()
+            
+            # Remove saved state from database
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Failed to clear user state from DB: {e}")
+            
             return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error in confirm_order for user {user_id}: {e}")
-        log_error(user_id, f"Confirm order error: {e}")
-        save_user_state(user_id, context.user_data)
+        logger.error(f"Error in confirm_order: {e}")
+        log_error(update.effective_user.id, e, "confirm_order")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
         return await start(update, context)
 
 # Handle inline button clicks
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        user_id = update.callback_query.from_user.id
         query = update.callback_query
         await query.answer()
         
         if query.data == "restart":
+            # Clear user data and restart
             context.user_data.clear()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
-            conn.commit()
-            conn.close()
+            
+            # Remove saved state from database
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM user_states WHERE user_id = ?", (query.from_user.id,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Failed to clear user state from DB: {e}")
             
             keyboard = [[category] for category in MENU.keys()]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
@@ -931,39 +1088,53 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 f"Hello! 😊 Welcome to One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
                 reply_markup=reply_markup
             )
-            context.user_data.update({"cart": [], "state": CATEGORY})
-            save_user_state(user_id, context.user_data)
             return CATEGORY
-        
+            
         return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error in handle_button for user {user_id}: {e}")
-        log_error(user_id, f"Handle button error: {e}")
+        logger.error(f"Error in handle_button: {e}")
+        log_error(update.effective_user.id, e, "handle_button")
         return ConversationHandler.END
 
 # Cancel order
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
-        await update.message.reply_text("Canceled. Type /start to begin again! 😊", reply_markup=ReplyKeyboardRemove())
+        
+        await update.message.reply_text(
+            "Canceled. Type /start to begin again! 😊",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # Clear user data
         context.user_data.clear()
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
+        
+        # Remove saved state from database
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to clear user state from DB: {e}")
+        
         return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error in cancel for user {user_id}: {e}")
-        log_error(user_id, f"Cancel error: {e}")
+        logger.error(f"Error in cancel: {e}")
+        log_error(update.effective_user.id, e, "cancel")
         return ConversationHandler.END
 
 # Main function to run the bot
-if __name__ == "__main__":
+def main() -> None:
     try:
+        # Initialize the database
         init_db()
+        
+        # Create the application
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Set up the conversation handler
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
             states={
@@ -979,15 +1150,22 @@ if __name__ == "__main__":
                 CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
+            persistent=True,
+            name="conversation_handler"
         )
         
+        # Add handlers to application
         application.add_handler(conv_handler)
         application.add_handler(CallbackQueryHandler(handle_button))
         application.add_handler(CommandHandler("orders", orders))
         
+        # Run the bot
         logger.info("Bot started.")
         application.run_polling()
     except Exception as e:
         logger.error(f"Error in main: {e}")
-        log_error(0, f"Main error: {e}")
+        log_error(0, e, "main")
         raise
+
+if __name__ == "__main__":
+    main()
