@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 import os
-from pathlib import Path  # Added for path handling
+from pathlib import Path
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -116,7 +116,8 @@ def init_db():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Save order to SQLite
 def save_to_db(order):
@@ -141,7 +142,8 @@ def save_to_db(order):
     except Exception as e:
         logger.error(f"Failed to save order to database: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Get recent orders from SQLite (last 5)
 def get_recent_orders():
@@ -155,7 +157,8 @@ def get_recent_orders():
         logger.error(f"Failed to get recent orders: {e}")
         return []
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Command /orders (for admins only)
 async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,7 +175,6 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info("No orders found for /orders command.")
             return
 
-        # Format the orders for display
         response = "Recent Orders (last 5):\n\n"
         for order in orders:
             order_id, date, items_json, total_price, delivery, address, table_number, name, phone = order
@@ -207,18 +209,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.effective_user.id
         logger.info(f"Received /start from user {user_id}")
-        # Clear old data to prevent errors
+        
+        # Clear and initialize user data
         context.user_data.clear()
-        # Initialize cart
-        context.user_data["cart"] = []
-        # Show menu categories with the cafe address
+        context.user_data.update({
+            "cart": [],
+            "category": None,
+            "delivery": None,
+            "address": None,
+            "name": None,
+            "table": None,
+            "phone": None,
+            "previous_state": None
+        })
+        
+        # Show menu categories
         keyboard = [[category] for category in MENU.keys()]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         await update.message.reply_text(
             f"Hello! 😊 Welcome to One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
             reply_markup=reply_markup
         )
-        logger.info(f"Sent welcome message to user {user_id}")
         return CATEGORY
     except Exception as e:
         logger.error(f"Error in start for user {user_id}: {e}")
@@ -228,9 +239,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # Select category
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Verify user data is initialized
+        if "cart" not in context.user_data:
+            return await start(update, context)
+            
         category = update.message.text
         if category == "Back":
-            # No previous state at CATEGORY, so just restart
             return await start(update, context)
         
         if category not in MENU:
@@ -239,10 +253,10 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         context.user_data["category"] = category
         context.user_data["previous_state"] = CATEGORY
-        # Create a numbered list of drinks
+        
         items = MENU[category]
         items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
-        # Create buttons (3 per row)
+        
         keyboard = []
         row = []
         for item in items:
@@ -252,10 +266,9 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 row = []
         if row:
             keyboard.append(row)
-        # Add Back button
         keyboard.append(["Back"])
+        
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        # Send message with a nice list and buttons
         await update.message.reply_text(
             f"Choose a drink from the category {category}:\n\n{items_list}\n\nTap on the drink name below:",
             reply_markup=reply_markup
@@ -264,14 +277,17 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error in select_category: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return CATEGORY
+        return await start(update, context)
 
 # Select drink
 async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Verify user data is initialized
+        if "cart" not in context.user_data or "category" not in context.user_data:
+            return await start(update, context)
+            
         selected_item = update.message.text
         if selected_item == "Back":
-            # Go back to CATEGORY
             return await start(update, context)
 
         category = context.user_data["category"]
@@ -281,12 +297,16 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await update.message.reply_text("Please choose a drink from the list! 😊")
             return ITEM
         
-        # Add the selected drink to the cart
+        # Initialize cart if not exists
+        if not isinstance(context.user_data.get("cart"), list):
+            context.user_data["cart"] = []
+            
         context.user_data["cart"].append({"name": item["name"], "price": item["price"]})
         context.user_data["previous_state"] = ITEM
-        # Show the cart and ask what to do next
+        
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
         total_price = sum(drink["price"] for drink in context.user_data["cart"])
+        
         await update.message.reply_text(
             f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
             reply_markup=ReplyKeyboardMarkup(
@@ -298,17 +318,25 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         logger.error(f"Error in select_item: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return ITEM
+        return await start(update, context)
 
 # Cart actions
 async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Verify cart exists and is a list
+        if "cart" not in context.user_data or not isinstance(context.user_data["cart"], list):
+            await update.message.reply_text("Your cart is empty! Let's start over.")
+            return await start(update, context)
+            
         action = update.message.text
         if action == "Back":
-            # Go back to ITEM
-            category = context.user_data["category"]
+            category = context.user_data.get("category")
+            if not category:
+                return await start(update, context)
+                
             items = MENU[category]
             items_list = "\n".join([f"{i+1}. {item['name']} — {item['price']} $" for i, item in enumerate(items)])
+            
             keyboard = []
             row = []
             for item in items:
@@ -319,6 +347,7 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             if row:
                 keyboard.append(row)
             keyboard.append(["Back"])
+            
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             await update.message.reply_text(
                 f"Choose a drink from the category {category}:\n\n{items_list}\n\nTap on the drink name below:",
@@ -327,8 +356,6 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return ITEM
 
         if action == "Add More Drinks":
-            # Go back to category selection
-            context.user_data["previous_state"] = CART
             keyboard = [[category] for category in MENU.keys()]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             await update.message.reply_text(
@@ -337,14 +364,14 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
             return CATEGORY
         elif action == "Remove a Drink":
-            # Show the cart and ask which drink to remove
             cart = context.user_data["cart"]
             if not cart:
                 await update.message.reply_text("Your cart is empty! Let's add some drinks.")
                 return CATEGORY
-            context.user_data["previous_state"] = CART
+                
             keyboard = [[drink["name"] for drink in cart]] + [["Back to Cart"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\n\nWhich drink would you like to remove?",
@@ -352,11 +379,10 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
             return REMOVE
         elif action == "Place Order":
-            # Proceed to delivery/pickup/on-site
             if not context.user_data["cart"]:
                 await update.message.reply_text("Your cart is empty! Let's add some drinks.")
                 return CATEGORY
-            context.user_data["previous_state"] = CART
+                
             keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
@@ -367,16 +393,20 @@ async def cart_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         logger.error(f"Error in cart_action: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return CART
+        return await start(update, context)
 
 # Remove a drink from the cart
 async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Verify cart exists
+        if "cart" not in context.user_data or not isinstance(context.user_data["cart"], list):
+            return await start(update, context)
+            
         selection = update.message.text
         if selection == "Back to Cart":
-            # Return to cart actions
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
             total_price = sum(drink["price"] for drink in context.user_data["cart"])
+            
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
                 reply_markup=ReplyKeyboardMarkup(
@@ -385,11 +415,14 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 )
             )
             return CART
+            
         # Remove the selected drink
         context.user_data["cart"] = [drink for drink in context.user_data["cart"] if drink["name"] != selection]
-        # Show the updated cart
+        
+        # Show updated cart
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
         total_price = sum(drink["price"] for drink in context.user_data["cart"])
+        
         await update.message.reply_text(
             f"Drink removed! Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
             reply_markup=ReplyKeyboardMarkup(
@@ -401,16 +434,21 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         logger.error(f"Error in remove_item: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return REMOVE
+        return await start(update, context)
 
 # Select delivery, pickup, or drink on-site
 async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Verify cart exists
+        if "cart" not in context.user_data or not context.user_data["cart"]:
+            await update.message.reply_text("Your cart is empty! Let's add some drinks.")
+            return await start(update, context)
+            
         delivery = update.message.text
         if delivery == "Back":
-            # Go back to CART
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in context.user_data["cart"]])
             total_price = sum(drink["price"] for drink in context.user_data["cart"])
+            
             await update.message.reply_text(
                 f"Your cart:\n{cart_summary}\nTotal: {total_price:.2f} $\n\nWhat would you like to do next?",
                 reply_markup=ReplyKeyboardMarkup(
@@ -423,8 +461,10 @@ async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if delivery not in ["Delivery", "Pickup", "Drink On-Site"]:
             await update.message.reply_text("Choose 'Delivery', 'Pickup', or 'Drink On-Site'! 😊")
             return DELIVERY
+            
         context.user_data["delivery"] = delivery
         context.user_data["previous_state"] = DELIVERY
+        
         if delivery == "Delivery":
             await update.message.reply_text("Enter your delivery address:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
             return ADDRESS
@@ -434,34 +474,35 @@ async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error in select_delivery: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return DELIVERY
+        return await start(update, context)
 
 # Enter address (for delivery only)
 async def get_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         address = update.message.text
         if address == "Back":
-            # Go back to DELIVERY
             keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
             return DELIVERY
+            
         context.user_data["address"] = address
         context.user_data["previous_state"] = ADDRESS
+        
         await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
         return NAME
     except Exception as e:
         logger.error(f"Error in get_address: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return ADDRESS
+        return await start(update, context)
 
 # Enter name
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         name = update.message.text
         if name == "Back":
-            # Go back to the previous state
-            previous_state = context.user_data.get("previous_state")
+            previous_state = context.user_data.get("previous_state", DELIVERY)
+            
             if previous_state == DELIVERY:
                 keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
                 reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
@@ -471,34 +512,30 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 await update.message.reply_text("Enter your delivery address:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
                 return ADDRESS
             else:
-                # Default to DELIVERY if something goes wrong
-                keyboard = [["Delivery"], ["Pickup"], ["Drink On-Site"], ["Back"]]
-                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-                await update.message.reply_text("How would you like to receive your order?", reply_markup=reply_markup)
-                return DELIVERY
-
+                return await start(update, context)
+                
         context.user_data["name"] = name
         context.user_data["previous_state"] = NAME
+        
         if context.user_data["delivery"] == "Drink On-Site":
             await update.message.reply_text("Enter your table number:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
             return TABLE
+            
         await update.message.reply_text("Enter your phone number (e.g., +1234567890):", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
         return PHONE
     except Exception as e:
         logger.error(f"Error in get_name: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return NAME
+        return await start(update, context)
 
 # Enter table number (for on-site orders)
 async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         table = update.message.text
         if table == "Back":
-            # Go back to NAME
             await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
             return NAME
 
-        # Validate table number (must be a number between 1 and 20)
         try:
             table_num = int(table)
             if not 1 <= table_num <= 20:
@@ -507,12 +544,15 @@ async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         except ValueError:
             await update.message.reply_text("Please enter a valid table number (e.g., 5)!")
             return TABLE
+            
         context.user_data["table"] = table
         context.user_data["previous_state"] = TABLE
-        # Skip phone number for Drink On-Site and go straight to confirmation
+        
+        # Show order summary
         cart = context.user_data["cart"]
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
         total_price = sum(drink["price"] for drink in cart)
+        
         order_summary = (
             f"Your order:\n"
             f"Drinks:\n{cart_summary}\n"
@@ -522,6 +562,7 @@ async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             f"Name: {context.user_data['name']}\n"
             f"Everything correct? (Yes/No)"
         )
+        
         keyboard = [["Yes"], ["No"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         await update.message.reply_text(order_summary, reply_markup=reply_markup)
@@ -529,42 +570,46 @@ async def get_table(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception as e:
         logger.error(f"Error in get_table: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return TABLE
+        return await start(update, context)
 
 # Enter phone number (for Delivery and Pickup only)
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         phone = update.message.text
         if phone == "Back":
-            # Go back to NAME
             await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardMarkup([["Back"]], one_time_keyboard=True))
             return NAME
 
-        # Validate phone number
         if not re.match(r"^\+?\d{10,15}$", phone):
             await update.message.reply_text("Oops, please enter a valid phone number (e.g., +1234567890)! 😊")
             return PHONE
+            
         context.user_data["phone"] = phone
         context.user_data["previous_state"] = PHONE
-        # Show order summary with all drinks
+        
+        # Show order summary
         cart = context.user_data["cart"]
         cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
         total_price = sum(drink["price"] for drink in cart)
+        
         order_summary = (
             f"Your order:\n"
             f"Drinks:\n{cart_summary}\n"
             f"Total: {total_price:.2f} $\n"
             f"Method: {context.user_data['delivery']}\n"
         )
+        
         if context.user_data["delivery"] == "Delivery":
             order_summary += f"Address: {context.user_data.get('address', 'Not specified')}\n"
         elif context.user_data["delivery"] == "Drink On-Site":
             order_summary += f"Table Number: {context.user_data.get('table', 'Not specified')}\n"
+            
         order_summary += (
             f"Name: {context.user_data['name']}\n"
             f"Phone: {context.user_data['phone']}\n"
             f"Everything correct? (Yes/No)"
         )
+        
         keyboard = [["Yes"], ["No"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         await update.message.reply_text(order_summary, reply_markup=reply_markup)
@@ -572,15 +617,23 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception as e:
         logger.error(f"Error in get_phone: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return PHONE
+        return await start(update, context)
 
 # Confirm order
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         if update.message.text == "Yes":
-            # Create order with all drinks
+            # Verify all required data exists
+            required_fields = ["cart", "delivery", "name"]
+            for field in required_fields:
+                if field not in context.user_data:
+                    await update.message.reply_text("Oops, something went wrong with your order. Let's start over!")
+                    return await start(update, context)
+                    
+            # Create order
             cart = context.user_data["cart"]
             total_price = sum(drink["price"] for drink in cart)
+            
             order = {
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Items": cart,
@@ -591,9 +644,11 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 "Name": context.user_data["name"],
                 "Phone": context.user_data.get("phone", "Not provided"),
             }
-            # Save to SQLite
+            
+            # Save to database
             save_to_db(order)
-            # Notify admins via Telegram
+            
+            # Notify admins
             cart_summary = "\n".join([f"- {drink['name']} — {drink['price']} $" for drink in cart])
             order_summary = (
                 f"New order:\n"
@@ -602,36 +657,42 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 f"Total: {total_price:.2f} $\n"
                 f"Method: {order['Delivery']}\n"
             )
+            
             if order["Delivery"] == "Delivery":
                 order_summary += f"Address: {order['Address']}\n"
             elif order["Delivery"] == "Drink On-Site":
                 order_summary += f"Table Number: {order['Table']}\n"
+                
             order_summary += (
                 f"Name: {order['Name']}\n"
                 f"Phone: {order['Phone']}"
             )
+            
             if order["Delivery"] == "Pickup":
                 order_summary += f"\nPickup Location: {CAFE_ADDRESS}"
-            # Send notification to all admins
+                
+            # Send to all admins
             for admin_id in ADMIN_IDS:
                 try:
                     await context.bot.send_message(chat_id=admin_id, text=order_summary)
-                    logger.info(f"Notification sent to admin {admin_id}.")
                 except Exception as e:
-                    logger.error(f"Failed to send notification to admin {admin_id}: {e}")
-            # Confirm to user with the exact message
+                    logger.error(f"Failed to notify admin {admin_id}: {e}")
+            
+            # Confirm to user
             confirmation_message = (
                 f"Great! Your order is placed! Thank you! 😊\n"
                 f"Please pick up your order at: {CAFE_ADDRESS}\n\n"
                 f"To place another order, tap the button below or type /start!"
             )
-            # Add inline button to restart
+            
             reply_markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Place Another Order", callback_data="restart")]
             ])
+            
             await update.message.reply_text(confirmation_message, reply_markup=reply_markup)
-            # Clear the cart
-            context.user_data["cart"] = []
+            
+            # Clear user data (except for persistent settings if any)
+            context.user_data.clear()
             return ConversationHandler.END
         else:
             await update.message.reply_text("Order canceled. Type /start to begin again! 😊", reply_markup=ReplyKeyboardRemove())
@@ -639,24 +700,27 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except Exception as e:
         logger.error(f"Error in confirm_order: {e}")
         await update.message.reply_text("Something went wrong. Please try again! 😊")
-        return ConversationHandler.END
+        return await start(update, context)
 
 # Handle inline button clicks
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         query = update.callback_query
         await query.answer()
+        
         if query.data == "restart":
-            # Simulate /start command
-            context.user_data["cart"] = []
+            # Clear user data and restart
+            context.user_data.clear()
+            
             keyboard = [[category] for category in MENU.keys()]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
             await query.message.reply_text(
                 f"Hello! 😊 Welcome to One Shot Cafe!\nWe are located at: {CAFE_ADDRESS}\nChoose a category:",
                 reply_markup=reply_markup
             )
-            logger.info(f"User {query.from_user.id} restarted the order process.")
             return CATEGORY
+            
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error in handle_button: {e}")
@@ -666,7 +730,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         await update.message.reply_text("Canceled. Type /start to begin again! 😊", reply_markup=ReplyKeyboardRemove())
-        logger.info(f"User {update.effective_user.id} canceled the order.")
+        context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error in cancel: {e}")
@@ -677,8 +741,10 @@ if __name__ == "__main__":
     try:
         # Initialize the database
         init_db()
+        
         # Create the application
         application = Application.builder().token(BOT_TOKEN).build()
+        
         # Set up the conversation handler
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
@@ -696,10 +762,12 @@ if __name__ == "__main__":
             },
             fallbacks=[CommandHandler("cancel", cancel)],
         )
+        
         # Add handlers to application
         application.add_handler(conv_handler)
         application.add_handler(CallbackQueryHandler(handle_button))
         application.add_handler(CommandHandler("orders", orders))
+        
         # Start the bot
         logger.info("Bot started.")
         application.run_polling()
